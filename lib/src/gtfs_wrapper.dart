@@ -1,18 +1,23 @@
 import 'dart:async';
 import 'dart:isolate';
 
+import 'package:flutter/services.dart';
 import 'package:gtfs_binary_dart/gtfs_binary_dart.dart' as g;
 import 'package:gtfs_binary_flutter/src/models/feed_info.dart';
 import 'package:gtfs_binary_flutter/src/multi_binary.dart';
 import 'package:gtfs_binary_flutter/src/models/stop.dart';
 import 'package:gtfs_binary_flutter/src/models/route.dart';
 import 'package:gtfs_binary_flutter/src/models/departure.dart';
+import 'package:gtfs_binary_flutter/src/models/update_status.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:logging/logging.dart';
 
 /// A wrapper around multiple GTFS Binary files. Use [create] to instantiate.
 /// Keeps the files in a documents subdirectory and updates them on demand.
 /// Runs processing in a separate thread to not block the UI.
 class GtfsWrapper {
+  static final _logger = Logger("GtfsWrapper");
+
   final SendPort _commands;
   final ReceivePort _responses;
   final Map<int, Completer<Object?>> _activeRequests = {};
@@ -33,7 +38,7 @@ class GtfsWrapper {
     };
 
     try {
-      await Isolate.spawn(_startWrapperIsolate, (initPort.sendPort));
+      await Isolate.spawn(_startWrapperIsolate, (initPort.sendPort, RootIsolateToken.instance!));
     } on Object {
       initPort.close();
       rethrow;
@@ -55,7 +60,12 @@ class GtfsWrapper {
 
   void _handleResponse(dynamic message) {
     final (int id, Object? response) = message as (int, Object?);
-    if (_activeStreams.containsKey(id)) {
+    if (id == -1) {
+      // Logger
+      final args = response as List;
+      _logger.log(args[0], args[1], args[2], args[3]);
+    } else if (_activeStreams.containsKey(id)) {
+      // Stream<?>
       final controller = _activeStreams[id]!;
       if (response is RemoteError) {
         controller.addError(response);
@@ -68,6 +78,7 @@ class GtfsWrapper {
         controller.add(response);
       }
     } else if (_activeRequests.containsKey(id)) {
+      // Future<?>
       final completer = _activeRequests.remove(id)!;
       if (response is RemoteError) {
         completer.completeError(response);
@@ -79,10 +90,15 @@ class GtfsWrapper {
     }
   }
 
-  static void _startWrapperIsolate(SendPort sendPort) async {
+  static void _startWrapperIsolate((SendPort, RootIsolateToken) args) async {
+    final sendPort = args.$1;
     final receivePort = ReceivePort();
     sendPort.send(receivePort.sendPort);
 
+    BackgroundIsolateBinaryMessenger.ensureInitialized(args.$2);
+    Logger.root.onRecord.listen((record) {
+      sendPort.send((-1, [record.level, record.message, record.error, record.stackTrace]));
+    });
     final gtfs = MultiGtfsBinary();
     await gtfs.readFeeds();
 
@@ -93,9 +109,7 @@ class GtfsWrapper {
         try {
           switch (message.command) {
             case GtfsBinaryCommand.queryFeeds:
-              sendPort.send((message.id, await gtfs.queryFeeds()));
-            case GtfsBinaryCommand.queryFeedsToUpdate:
-              sendPort.send((message.id, await gtfs.queryFeedsToUpdate()));
+              sendPort.send((message.id, await gtfs.queryFeeds(download: message.arguments[0])));
             case GtfsBinaryCommand.downloadFeeds:
               await for (final status in gtfs.downloadFeeds(message.arguments[0])) {
                 sendPort.send((message.id, status));
@@ -138,8 +152,8 @@ class GtfsWrapper {
                 gtfs.findDeparturesForDay(message.arguments[0], message.arguments[1], message.arguments[2]),
               ));
           }
-        } catch (e) {
-          sendPort.send((message.id, RemoteError(e.toString(), '')));
+        } catch (e, trace) {
+          sendPort.send((message.id, RemoteError(e.toString(), trace.toString())));
         }
       }
     });
@@ -161,9 +175,7 @@ class GtfsWrapper {
     return completer.stream;
   }
 
-  Future<List<FeedInfo>> queryFeeds() => _sendCommand(GtfsBinaryCommand.queryFeeds, []);
-
-  Future<List<FeedInfo>> queryFeedsToUpdate() => _sendCommand(GtfsBinaryCommand.queryFeedsToUpdate, []);
+  Future<List<FeedInfo>> queryFeeds({bool download = true}) => _sendCommand(GtfsBinaryCommand.queryFeeds, [download]);
 
   Stream<UpdateStatus> downloadFeeds(List<String> feedIds) =>
       _sendStreamCommand(GtfsBinaryCommand.downloadFeeds, [feedIds]);
@@ -187,7 +199,7 @@ class GtfsWrapper {
       _sendCommand(GtfsBinaryCommand.findStopsAround, [center, radiusMeters]);
 
   Future<List<Stop>> findStopsForBounds(LatLng southWest, LatLng northEast) =>
-      _sendCommand(GtfsBinaryCommand.findStopsAround, [southWest, northEast]);
+      _sendCommand(GtfsBinaryCommand.findStopsForBounds, [southWest, northEast]);
 
   Future<List<Route>> getRoutesForStop(Stop stop) => _sendCommand(GtfsBinaryCommand.getRoutesForStop, [stop]);
 
@@ -208,7 +220,6 @@ class StreamCompleted {}
 
 enum GtfsBinaryCommand {
   queryFeeds,
-  queryFeedsToUpdate,
   downloadFeeds,
   updateFeeds,
   getStopByGtfsId,

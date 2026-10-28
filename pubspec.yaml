@@ -15,8 +15,7 @@ dependencies:
   logging: ^1.3.0
   dio: ^5.11.1
   path_provider: ^2.1.6
-  gtfs_binary_dart:
-    path: ../gtfs_binary_dart
+  gtfs_binary_dart: ^0.1.0
 
 dev_dependencies:
   flutter_test:

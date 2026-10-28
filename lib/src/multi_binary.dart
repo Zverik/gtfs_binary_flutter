@@ -1,4 +1,3 @@
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:dio/dio.dart';
@@ -11,6 +10,8 @@ import 'package:gtfs_binary_flutter/src/models/stop.dart';
 import 'package:gtfs_binary_flutter/src/models/route.dart';
 import 'package:gtfs_binary_flutter/src/models/departure.dart';
 
+import 'models/update_status.dart';
+
 class FeedNotFound implements Exception {
   String feedName;
 
@@ -18,17 +19,6 @@ class FeedNotFound implements Exception {
 
   @override
   String toString() => 'Feed not found: $feedName';
-}
-
-enum UpdateStep { downloading, updating, loading, done }
-
-class UpdateStatus {
-  final String feedId;
-  final UpdateStep step;
-  final int processed;
-  final int total;
-
-  const UpdateStatus(this.feedId, this.step, this.processed, this.total);
 }
 
 /// Storage for multiple GTFS Binary feeds. Makes requests synchronously,
@@ -70,57 +60,36 @@ class MultiGtfsBinary {
   }
 
   /// Downloads feed information from the server.
-  Future<List<FeedInfo>> queryFeeds() async {
-    final result = <FeedInfo>[];
-    final response = await _dio.get("https://$_endpoint/gtb/feeds.json");
-    if (response.statusCode != 200) {
-      _logger.warning('HTTP ${response.statusCode} when querying ${response.realUri}');
-    } else {
-      final data = json.decode(response.data.toString());
-      if (data is! Map || !data.containsKey('diffs')) {
-        _logger.warning('Wrong json downloaded for feeds: $data');
+  Future<List<FeedInfo>> queryFeeds({bool download = true}) async {
+    final result = _feeds.map((k, v) => MapEntry(k, v.getFeedInfo(k)));
+    if (download) {
+      final response = await _dio.get("https://$_endpoint/gtb/feeds.json");
+      if (response.statusCode != 200) {
+        _logger.warning('HTTP ${response.statusCode} when querying ${response.realUri}');
       } else {
-        for (final entry in data.entries) {
-          final p = entry.value as Map;
-          final bbox = p['bbox'] as List;
-          result.add(
-            FeedInfo(
+        final data = response.data;
+        if (data is! Map) {
+          _logger.warning('Wrong json downloaded for feeds: $data');
+        } else {
+          for (final entry in data.entries) {
+            final p = entry.value as Map;
+            final bbox = p['bbox_lat_lon'] as List;
+            result[entry.key] = FeedInfo(
               feedId: entry.key,
-              version: p['version'],
+              installedVersion: result[entry.key]?.installedVersion,
+              latestVersion: p['version'],
               date: DateTime.parse(p['date']),
               southWest: LatLng(bbox[0], bbox[1]),
               northEast: LatLng(bbox[2], bbox[3]),
               hasShapes: p['has_shapes'] ?? false,
               title: p['title'],
               titleEn: p['title_en'],
-            ),
-          );
+            );
+          }
         }
       }
     }
-    return result;
-  }
-
-  /// Compares versions for all the feeds we have with the server versions.
-  /// Returns a list of feed names that can be updated.
-  Future<List<FeedInfo>> queryFeedsToUpdate() async {
-    final result = <FeedInfo>[];
-    for (final feedId in _feeds.keys) {
-      FeedInfo info = _feeds[feedId]!.getFeedInfo(feedId);
-      final response = await _dio.get("https://$_endpoint/gtb/diff/$feedId/versions.json");
-      if (response.statusCode != 200) {
-        _logger.warning('HTTP ${response.statusCode} when querying ${response.realUri}');
-      } else {
-        final data = json.decode(response.data.toString());
-        if (data is! Map || !data.containsKey('diffs')) {
-          _logger.warning('Wrong json downloaded for $feedId: $data');
-        } else {
-          info = info.withLatestVersion(data['latest']);
-        }
-      }
-      result.add(info);
-    }
-    return result;
+    return result.values.toList();
   }
 
   /// Downloads feeds listed.
@@ -244,24 +213,27 @@ class MultiGtfsBinary {
   }
 
   List<Stop> findStopsByName(String query) {
-    return _feeds.entries
-        .map((entry) => entry.value.autocompleteStops(query).map((s) => s.withRegion(entry.key)))
-        .reduce((a, b) => a.followedBy(b))
-        .toList();
+    final stopList = _feeds.entries.map(
+      (entry) => entry.value.autocompleteStops(query).map((s) => s.withRegion(entry.key)),
+    );
+    if (stopList.isEmpty) return [];
+    return stopList.reduce((a, b) => a.followedBy(b)).toList();
   }
 
   List<Stop> findStopsAround(LatLng center, double radiusMeters) {
-    return _feeds.entries
-        .map((entry) => entry.value.findStopsAround(center, radiusMeters).map((s) => s.withRegion(entry.key)))
-        .reduce((a, b) => a.followedBy(b))
-        .toList();
+    final stopList = _feeds.entries.map(
+      (entry) => entry.value.findStopsAround(center, radiusMeters).map((s) => s.withRegion(entry.key)),
+    );
+    if (stopList.isEmpty) return [];
+    return stopList.reduce((a, b) => a.followedBy(b)).toList();
   }
 
   List<Stop> findStopsForBounds(LatLng southWest, LatLng northEast) {
-    return _feeds.entries
-        .map((entry) => entry.value.findStopsForBounds(southWest, northEast).map((s) => s.withRegion(entry.key)))
-        .reduce((a, b) => a.followedBy(b))
-        .toList();
+    final stopList = _feeds.entries.map(
+      (entry) => entry.value.findStopsForBounds(southWest, northEast).map((s) => s.withRegion(entry.key)),
+    );
+    if (stopList.isEmpty) return [];
+    return stopList.reduce((a, b) => a.followedBy(b)).toList();
   }
 
   List<Route> getRoutesForStop(Stop stop) {
